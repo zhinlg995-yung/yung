@@ -1,0 +1,159 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#f7f7f5">
+  <meta name="description" content="简洁、私密的个人笔记与待办清单。数据保存在本机。">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="apple-mobile-web-app-title" content="简记">
+  <link rel="manifest" href="./manifest.webmanifest">
+  <link rel="icon" type="image/png" sizes="192x192" href="./icons/icon-192.png">
+  <link rel="apple-touch-icon" href="./icons/icon-192.png">
+  <link rel="stylesheet" href="./styles.css">
+  <title>简记 · 个人笔记</title>
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar" id="sidebar" aria-label="笔记导航">
+      <div class="brand-row">
+        <div class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></div>
+        <div class="brand-copy"><strong>简记</strong><small>PERSONAL NOTES</small></div>
+      </div>
+
+      <button class="primary-button sidebar-new" id="sidebarNewNote" type="button">
+        <span class="plus-glyph">＋</span> 新建笔记 <kbd>⌘ N</kbd>
+      </button>
+
+      <nav class="main-nav" aria-label="笔记范围">
+        <button class="nav-item active" type="button" data-filter="all">
+          <span class="nav-icon">▤</span><span>全部笔记</span><span class="nav-count" id="allCount">0</span>
+        </button>
+        <button class="nav-item" type="button" data-filter="tasks">
+          <span class="nav-icon check-icon">✓</span><span>待办清单</span><span class="nav-count" id="taskCount">0</span>
+        </button>
+      </nav>
+
+      <div class="sidebar-section-heading">
+        <span>文件夹</span>
+        <button class="icon-button tiny" id="addFolderButton" type="button" aria-label="新建文件夹" title="新建文件夹">＋</button>
+      </div>
+      <div class="folder-list" id="folderList"></div>
+
+      <div class="sidebar-spacer"></div>
+      <div class="sidebar-bottom">
+        <div class="storage-indicator"><span class="status-dot"></span><span>仅保存在此设备</span></div>
+        <div class="sidebar-tools">
+          <button class="text-button" id="exportButton" type="button">↥ 备份笔记</button>
+          <button class="text-button" id="importButton" type="button">↧ 导入备份</button>
+          <input id="importFile" type="file" accept="application/json,.json" hidden>
+        </div>
+        <p class="sidebar-footnote">你的笔记不会上传到云端</p>
+      </div>
+    </aside>
+
+    <div class="sidebar-scrim" id="sidebarScrim"></div>
+
+    <main class="main-area">
+      <header class="topbar">
+        <div class="topbar-left">
+          <button class="icon-button menu-button" id="menuButton" type="button" aria-label="打开导航">☰</button>
+          <div class="topbar-title-wrap">
+            <span class="eyebrow">YOUR PRIVATE SPACE</span>
+            <div class="topbar-title" id="topbarTitle">全部笔记</div>
+          </div>
+        </div>
+        <div class="topbar-right">
+          <span class="save-status" id="saveStatus"><span class="status-dot"></span> 已保存在此设备</span>
+          <button class="icon-button mobile-export" id="mobileExportButton" type="button" aria-label="备份笔记" title="备份笔记">↥</button>
+          <button class="avatar-mark" type="button" aria-label="简记">简</button>
+        </div>
+      </header>
+
+      <div class="search-row">
+        <label class="search-box">
+          <span class="search-symbol" aria-hidden="true">⌕</span>
+          <input id="searchInput" type="search" placeholder="搜索笔记、内容或待办事项" autocomplete="off">
+          <kbd>⌘ K</kbd>
+        </label>
+        <span class="search-hint">在本机搜索</span>
+      </div>
+
+      <div class="workspace">
+        <section class="notes-panel" aria-label="笔记列表">
+          <div class="panel-heading">
+            <div>
+              <div class="section-kicker" id="sectionKicker">LIBRARY</div>
+              <h1 id="sectionTitle">全部笔记</h1>
+              <p class="section-subtitle" id="sectionSubtitle">把想法收好，随时继续。</p>
+            </div>
+            <div class="new-actions">
+              <button class="secondary-button new-task-button" id="newTaskButton" type="button"><span>☷</span><span>新建清单</span></button>
+              <button class="primary-button new-note-button" id="newNoteButton" type="button"><span>＋</span><span>新建笔记</span></button>
+            </div>
+          </div>
+          <div class="list-toolbar"><span id="resultCount">0 条内容</span><span class="sort-label">最近编辑 ↓</span></div>
+          <div class="notes-list" id="notesList"></div>
+        </section>
+
+        <section class="editor-panel" id="editorPanel" aria-label="笔记编辑区">
+          <div class="empty-editor" id="emptyEditor">
+            <div class="empty-illustration"><div class="paper-sheet"><i></i><i></i><i></i></div><span class="sparkle sparkle-one">✳</span><span class="sparkle sparkle-two">·</span></div>
+            <h2>给思绪一点空间</h2>
+            <p>选择一篇笔记继续编辑，<br>或创建一篇新的记录。</p>
+            <button class="primary-button" id="emptyCreateButton" type="button">＋ 创建第一篇笔记</button>
+          </div>
+
+          <div class="note-editor" id="noteEditor" hidden>
+            <div class="editor-toolbar">
+              <button class="back-button" id="backToListButton" type="button">← <span>返回列表</span></button>
+              <div class="editor-toolbar-right">
+                <select id="noteFolderSelect" class="folder-select" aria-label="选择文件夹"></select>
+                <button class="icon-button" id="pinButton" type="button" aria-label="收藏笔记" title="收藏">☆</button>
+                <button class="icon-button danger-hover" id="deleteNoteButton" type="button" aria-label="删除笔记" title="删除笔记">⌫</button>
+              </div>
+            </div>
+            <div class="editor-content">
+              <div class="note-type-label" id="noteTypeLabel">NOTE · 笔记</div>
+              <input class="note-title-input" id="noteTitleInput" type="text" placeholder="无标题" maxlength="120" aria-label="笔记标题">
+              <div class="note-meta"><span id="noteDateLabel">刚刚更新</span><span class="meta-separator">·</span><span id="noteWordCount">0 字</span></div>
+
+              <div class="plain-note-body" id="plainNoteBody">
+                <textarea id="noteContentInput" placeholder="从这里开始记录你的想法……" spellcheck="false" aria-label="笔记内容"></textarea>
+              </div>
+
+              <div class="task-note-body" id="taskNoteBody" hidden>
+                <div class="task-progress-line"><div class="progress-track"><span id="progressFill"></span></div><span id="progressText">0 / 0 已完成</span></div>
+                <div class="task-entry-row">
+                  <span class="task-entry-plus">＋</span>
+                  <input id="newTaskInput" type="text" placeholder="添加一项待办，按回车确认" maxlength="180" aria-label="添加待办">
+                  <button class="task-add-button" id="addTaskButton" type="button">添加</button>
+                </div>
+                <div class="task-items" id="taskItems"></div>
+                <p class="task-tip">勾选完成的事项，进度会自动更新。</p>
+              </div>
+            </div>
+            <div class="editor-bottom"><span class="bottom-lock">▣</span> 私密存储 · 仅此设备可见</div>
+          </div>
+        </section>
+      </div>
+    </main>
+  </div>
+
+  <dialog class="app-dialog" id="folderDialog">
+    <form method="dialog" id="folderForm">
+      <div class="dialog-topline"><span class="dialog-kicker">ORGANIZE</span><button class="dialog-close" value="cancel" aria-label="关闭">×</button></div>
+      <h2 id="folderDialogTitle">新建文件夹</h2>
+      <p class="dialog-description">用文件夹整理不同主题的笔记。</p>
+      <label class="dialog-label" for="folderNameInput">文件夹名称</label>
+      <input class="dialog-input" id="folderNameInput" type="text" maxlength="30" placeholder="例如：工作、灵感、生活" required>
+      <div class="dialog-actions"><button class="secondary-button" value="cancel">取消</button><button class="primary-button" id="saveFolderButton" value="default">保存</button></div>
+      <button class="delete-folder-button" id="deleteFolderButton" type="button" hidden>删除此文件夹</button>
+    </form>
+  </dialog>
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+  <script src="./app.js" defer></script>
+</body>
+</html>
