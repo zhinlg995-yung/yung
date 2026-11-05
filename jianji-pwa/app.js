@@ -27,7 +27,9 @@ const els = {
   attachImageInput: $('#attachImageInput'), attachFileInput: $('#attachFileInput'),
   attachGallery: $('#attachGallery'), attachFiles: $('#attachFiles'), attachSummary: $('#attachSummary'),
   imageDialog: $('#imageDialog'), viewerImage: $('#viewerImage'), viewerName: $('#viewerName'), viewerSave: $('#viewerSave'),
-  confirmDialog: $('#confirmDialog'), confirmTitle: $('#confirmTitle'), confirmMessage: $('#confirmMessage'), confirmOk: $('#confirmOkButton')
+  confirmDialog: $('#confirmDialog'), confirmTitle: $('#confirmTitle'), confirmMessage: $('#confirmMessage'),
+  confirmOk: $('#confirmOkButton'), confirmCancel: $('#confirmCancelButton'), confirmScrim: $('#confirmScrim'),
+  deleteNoteCta: $('#deleteNoteCta')
 };
 
 let state = null;
@@ -248,36 +250,43 @@ function showToast(message) {
   toastTimer = setTimeout(() => els.toast.classList.remove('show'), 2400);
 }
 
-// iPhone 主屏幕 PWA 里 window.confirm/alert 常被系统直接吞掉或立刻返回 false，
-// 导致删除笔记、附件等操作看起来“点了没反应”。统一改用应用内确认框。
+// 不用 window.confirm（iOS 主屏幕常被吞），也不依赖 <dialog>.showModal / returnValue
+//（部分 Safari 点确认后 returnValue 仍为空，删除会静默取消）。改用自绘确认层 + 按钮点击回调。
+let confirmResolver = null;
+
+function closeConfirmLayer() {
+  if (!els.confirmDialog) return;
+  els.confirmDialog.hidden = true;
+  document.body.classList.remove('confirm-open');
+}
+
 function askConfirm(message, { title = '确认操作', okText = '删除', cancelText = '取消' } = {}) {
   return new Promise(resolve => {
-    if (!els.confirmDialog || typeof els.confirmDialog.showModal !== 'function') {
-      resolve(window.confirm(message));
+    if (!els.confirmDialog || !els.confirmOk) {
+      resolve(false);
       return;
     }
-    let settled = false;
-    const finish = (value) => {
-      if (settled) return;
-      settled = true;
-      els.confirmDialog.removeEventListener('close', onClose);
-      els.confirmDialog.removeEventListener('cancel', onCancel);
-      resolve(value);
-    };
-    const onClose = () => finish(els.confirmDialog.returnValue === 'ok');
-    const onCancel = (event) => { event.preventDefault(); finish(false); };
+    if (confirmResolver) {
+      const prev = confirmResolver;
+      confirmResolver = null;
+      prev(false);
+    }
+    confirmResolver = resolve;
     els.confirmTitle.textContent = title;
     els.confirmMessage.textContent = message;
     els.confirmOk.textContent = okText;
-    const cancelBtn = els.confirmDialog.querySelector('button[value="cancel"].secondary-button');
-    if (cancelBtn) cancelBtn.textContent = cancelText;
-    els.confirmDialog.addEventListener('close', onClose);
-    els.confirmDialog.addEventListener('cancel', onCancel);
-    if (els.confirmDialog.open) els.confirmDialog.close('cancel');
-    els.confirmDialog.returnValue = '';
-    els.confirmDialog.showModal();
-    setTimeout(() => els.confirmOk.focus(), 30);
+    if (els.confirmCancel) els.confirmCancel.textContent = cancelText;
+    els.confirmDialog.hidden = false;
+    document.body.classList.add('confirm-open');
+    setTimeout(() => { try { els.confirmOk.focus(); } catch (_) {} }, 30);
   });
+}
+
+function settleConfirm(value) {
+  const resolve = confirmResolver;
+  confirmResolver = null;
+  closeConfirmLayer();
+  if (resolve) resolve(Boolean(value));
 }
 
 function getActiveNote() { return state.notes.find(note => note.id === state.activeNoteId) || null; }
@@ -727,12 +736,22 @@ function dataUrlToBlob(dataUrl, fallbackType) {
 }
 
 async function deleteCurrentNote() {
-  const note = getActiveNote(); if (!note) return;
+  const note = getActiveNote();
+  if (!note) { showToast('当前没有打开的笔记。'); return; }
   const ok = await askConfirm(`确定删除「${displayTitle(note)}」吗？此操作无法撤销。建议先备份重要内容。`, { title: '删除笔记', okText: '删除' });
   if (!ok) return;
   const attachmentIds = (note.attachments || []).map(item => item.id);
-  state.notes = state.notes.filter(item => item.id !== note.id);
-  state.activeNoteId = null; render(); scheduleSave();
+  const deletedId = note.id;
+  state.notes = state.notes.filter(item => item.id !== deletedId);
+  state.activeNoteId = null;
+  document.body.classList.remove('mobile-editing');
+  render();
+  try {
+    await saveNow();
+  } catch (error) {
+    console.error(error);
+    scheduleSave();
+  }
   deleteAttachments(attachmentIds).catch(error => console.error(error));
   showToast('笔记已删除。');
 }
@@ -806,7 +825,11 @@ function bindEvents() {
   els.noteContent.addEventListener('input', () => { const note = getActiveNote(); if (!note) return; note.content = els.noteContent.value; note.updatedAt = new Date().toISOString(); updateMeta(note); renderNotes(); scheduleSave(); });
   els.noteFolder.addEventListener('change', () => { const note = getActiveNote(); if (!note) return; note.folderId = els.noteFolder.value; note.updatedAt = new Date().toISOString(); renderFolders(); renderNotes(); scheduleSave(); });
   els.pinButton.addEventListener('click', () => { const note = getActiveNote(); if (!note) return; note.pinned = !note.pinned; note.updatedAt = new Date().toISOString(); renderEditor(); renderNotes(); scheduleSave(); });
-  $('#deleteNoteButton').addEventListener('click', deleteCurrentNote);
+  $('#deleteNoteButton').addEventListener('click', event => { event.preventDefault(); deleteCurrentNote(); });
+  if (els.deleteNoteCta) els.deleteNoteCta.addEventListener('click', event => { event.preventDefault(); deleteCurrentNote(); });
+  if (els.confirmOk) els.confirmOk.addEventListener('click', event => { event.preventDefault(); settleConfirm(true); });
+  if (els.confirmCancel) els.confirmCancel.addEventListener('click', event => { event.preventDefault(); settleConfirm(false); });
+  if (els.confirmScrim) els.confirmScrim.addEventListener('click', () => settleConfirm(false));
   $('#addTaskButton').addEventListener('click', addTask);
   els.newTaskInput.addEventListener('keydown', event => { if (event.key === 'Enter') { event.preventDefault(); addTask(); } });
   els.attachImageButton.addEventListener('click', () => els.attachImageInput.click());
@@ -830,7 +853,10 @@ function bindEvents() {
     const isMac = /Mac|iPhone|iPad/.test(navigator.platform);
     if ((isMac ? event.metaKey : event.ctrlKey) && event.key.toLowerCase() === 'n') { event.preventDefault(); createNote('note'); }
     if ((isMac ? event.metaKey : event.ctrlKey) && event.key.toLowerCase() === 'k') { event.preventDefault(); els.searchInput.focus(); }
-    if (event.key === 'Escape') closeSidebar();
+    if (event.key === 'Escape') {
+      if (els.confirmDialog && !els.confirmDialog.hidden) { settleConfirm(false); return; }
+      closeSidebar();
+    }
   });
   window.addEventListener('resize', () => { if (window.innerWidth > 820) document.body.classList.remove('mobile-editing'); });
   window.addEventListener('pagehide', () => { releaseUnusedUrls(new Set()); if (state) { try { localStorage.setItem(LEGACY_KEY, JSON.stringify(state)); } catch (_) { /* IndexedDB remains the primary store */ } } });

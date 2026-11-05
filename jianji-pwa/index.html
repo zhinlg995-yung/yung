@@ -111,7 +111,7 @@
               <div class="editor-toolbar-right">
                 <select id="noteFolderSelect" class="folder-select" aria-label="选择文件夹"></select>
                 <button class="icon-button" id="pinButton" type="button" aria-label="收藏笔记" title="收藏">☆</button>
-                <button class="icon-button danger-hover" id="deleteNoteButton" type="button" aria-label="删除笔记" title="删除笔记">⌫</button>
+                <button class="icon-button danger-hover" id="deleteNoteButton" type="button" aria-label="删除笔记" title="删除笔记">删除</button>
               </div>
             </div>
             <div class="editor-content">
@@ -146,6 +146,9 @@
                 <p class="task-tip">勾选完成的事项，进度会自动更新。</p>
               </div>
             </div>
+            <div class="editor-footer-actions">
+              <button class="delete-note-cta" id="deleteNoteCta" type="button">删除这篇笔记</button>
+            </div>
             <div class="editor-bottom"><span class="bottom-lock">▣</span> 私密存储 · 仅此设备可见</div>
           </div>
         </section>
@@ -168,17 +171,17 @@
     <div class="viewer-bar"><span class="viewer-name" id="viewerName"></span><a class="viewer-save" id="viewerSave" href="#" download>保存</a><button class="viewer-close" id="viewerClose" type="button" aria-label="关闭">×</button></div>
     <img id="viewerImage" alt="">
   </dialog>
-  <dialog class="app-dialog confirm-dialog" id="confirmDialog" aria-labelledby="confirmTitle">
-    <form method="dialog" id="confirmForm">
-      <div class="dialog-topline"><span class="dialog-kicker">CONFIRM</span><button class="dialog-close" value="cancel" type="submit" aria-label="关闭">×</button></div>
+  <div class="confirm-layer" id="confirmDialog" hidden>
+    <button class="confirm-scrim" id="confirmScrim" type="button" aria-label="关闭确认"></button>
+    <div class="confirm-sheet" role="dialog" aria-modal="true" aria-labelledby="confirmTitle">
       <h2 id="confirmTitle">确认操作</h2>
       <p class="dialog-description" id="confirmMessage"></p>
-      <div class="dialog-actions">
-        <button class="secondary-button" value="cancel" type="submit">取消</button>
-        <button class="primary-button danger-action" id="confirmOkButton" value="ok" type="submit">删除</button>
+      <div class="confirm-actions">
+        <button class="primary-button danger-action" id="confirmOkButton" type="button">删除</button>
+        <button class="secondary-button" id="confirmCancelButton" type="button">取消</button>
       </div>
-    </form>
-  </dialog>
+    </div>
+  </div>
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
   <script src="./app.js" defer></script>
