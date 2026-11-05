@@ -530,10 +530,6 @@ body.mobile-editing .editor-footer-actions {
 }
 
 @media (max-width: 820px) {
-      flex-direction: column-reverse; gap: 8px; margin-top: 22px;
-  }
-      width: 100%; min-height: 50px; font-size: 17px; border-radius: 14px;
-  }
   .sidebar {
     border-radius: 0 20px 20px 0;
   }
@@ -541,17 +537,21 @@ body.mobile-editing .editor-footer-actions {
 
 /* 自定义确认层：不依赖 <dialog>/showModal，iPhone 主屏幕更稳定 */
 .confirm-layer {
-  position: fixed; inset: 0; z-index: 200; display: flex; align-items: flex-end; justify-content: center;
-  padding: 0 12px max(12px, var(--safe-bottom));
+  position: fixed !important; inset: 0 !important; z-index: 1000 !important;
+  display: flex !important; align-items: flex-end; justify-content: center;
+  padding: 0 12px max(12px, env(safe-area-inset-bottom, 0px));
+  box-sizing: border-box;
 }
 .confirm-layer[hidden] { display: none !important; }
 .confirm-scrim {
-  position: absolute; inset: 0; border: 0; padding: 0; margin: 0;
-  background: rgba(0,0,0,.38); backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+  position: absolute; inset: 0; border: 0; padding: 0; margin: 0; width: 100%; height: 100%;
+  background: rgba(0,0,0,.4); backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
 }
 .confirm-sheet {
-  position: relative; z-index: 1; width: min(420px, 100%); background: #fff; border-radius: 18px;
+  position: relative; z-index: 1; width: min(420px, 100%); max-height: min(80dvh, 100%);
+  overflow: auto; background: #fff; border-radius: 18px;
   padding: 22px 18px 16px; box-shadow: 0 16px 48px rgba(0,0,0,.22);
+  margin-bottom: 0;
 }
 .confirm-sheet h2 { margin: 0 0 8px; font-size: 20px; font-weight: 700; letter-spacing: -0.02em; }
 .confirm-sheet .dialog-description { margin: 0 0 18px; font-size: 15px; color: var(--muted); line-height: 1.55; white-space: pre-wrap; }

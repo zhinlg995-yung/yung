@@ -1,5 +1,5 @@
 'use strict';
-const CACHE_NAME = 'jianji-shell-v5';
+const CACHE_NAME = 'jianji-shell-v6';
 const ASSETS = [
   './', './index.html', './styles.css', './app.js', './manifest.webmanifest',
   './icons/icon-192.png', './icons/icon-512.png'
