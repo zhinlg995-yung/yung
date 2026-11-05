@@ -1,5 +1,5 @@
 'use strict';
-const CACHE_NAME = 'jianji-shell-v1';
+const CACHE_NAME = 'jianji-shell-v2';
 const ASSETS = [
   './', './index.html', './styles.css', './app.js', './manifest.webmanifest',
   './icons/icon-192.png', './icons/icon-512.png'
@@ -9,7 +9,12 @@ self.addEventListener('install', event => {
   event.waitUntil((async () => {
     const cache = await caches.open(CACHE_NAME);
     const urls = ASSETS.map(path => new URL(path, self.registration.scope).toString());
-    await cache.addAll(urls);
+    // cache: 'reload' 绕过浏览器 HTTP 缓存，确保拿到最新文件
+    await Promise.all(urls.map(async url => {
+      const response = await fetch(new Request(url, { cache: 'reload' }));
+      if (!response.ok) throw new Error('缓存失败：' + url);
+      await cache.put(url, response);
+    }));
     await self.skipWaiting();
   })());
 });
@@ -30,7 +35,7 @@ self.addEventListener('fetch', event => {
   if (request.mode === 'navigate') {
     event.respondWith((async () => {
       try {
-        const response = await fetch(request);
+        const response = await fetch(request, { cache: 'no-cache' });
         const cache = await caches.open(CACHE_NAME);
         cache.put(new URL('./index.html', self.registration.scope), response.clone()).catch(() => {});
         return response;
@@ -44,7 +49,7 @@ self.addEventListener('fetch', event => {
   event.respondWith((async () => {
     const cached = await caches.match(request);
     try {
-      const response = await fetch(request);
+      const response = await fetch(request, { cache: 'no-cache' });
       if (response.ok) {
         const cache = await caches.open(CACHE_NAME);
         cache.put(request, response.clone()).catch(() => {});

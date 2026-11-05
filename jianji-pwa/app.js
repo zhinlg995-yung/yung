@@ -1,8 +1,12 @@
 'use strict';
 
 const DB_NAME = 'jianji-local-db';
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 const STORE_NAME = 'app-state';
+const ATTACH_STORE = 'attachments';
+const MAX_IMAGE_EDGE = 1600;
+const JPEG_QUALITY = 0.85;
+const MAX_FILE_BYTES = 50 * 1024 * 1024;
 const STATE_KEY = 'main';
 const LEGACY_KEY = 'jianji-state-v1';
 
@@ -18,7 +22,11 @@ const els = {
   wordCount: $('#noteWordCount'), pinButton: $('#pinButton'), taskItems: $('#taskItems'),
   newTaskInput: $('#newTaskInput'), progressFill: $('#progressFill'), progressText: $('#progressText'),
   folderDialog: $('#folderDialog'), folderForm: $('#folderForm'), folderDialogTitle: $('#folderDialogTitle'),
-  folderName: $('#folderNameInput'), deleteFolder: $('#deleteFolderButton'), toast: $('#toast'), importFile: $('#importFile')
+  folderName: $('#folderNameInput'), deleteFolder: $('#deleteFolderButton'), toast: $('#toast'), importFile: $('#importFile'),
+  attachImageButton: $('#attachImageButton'), attachFileButton: $('#attachFileButton'),
+  attachImageInput: $('#attachImageInput'), attachFileInput: $('#attachFileInput'),
+  attachGallery: $('#attachGallery'), attachFiles: $('#attachFiles'), attachSummary: $('#attachSummary'),
+  imageDialog: $('#imageDialog'), viewerImage: $('#viewerImage'), viewerName: $('#viewerName'), viewerSave: $('#viewerSave')
 };
 
 let state = null;
@@ -27,6 +35,8 @@ let saveTimer = null;
 let toastTimer = null;
 let editingFolderId = null;
 let isSaving = false;
+let attachRenderToken = 0;
+const objectUrls = new Map();
 
 function makeId(prefix = 'id') {
   return `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
@@ -39,8 +49,8 @@ function initialState() {
     folders: [{ id: 'folder_default', name: '默认文件夹', createdAt: now }],
     notes: [{
       id: 'note_welcome', folderId: 'folder_default', type: 'note', title: '欢迎使用简记',
-      content: '这里是你的私人笔记空间。\n\n• 点击左侧「新建笔记」记录想法。\n• 使用文件夹整理不同主题。\n• 创建待办清单，勾选完成的事项。\n• 搜索可以查找标题、正文和待办内容。\n\n笔记默认保存在这台设备的浏览器本地。建议定期使用左下角的「备份笔记」导出 JSON 文件，妥善保存备份。',
-      tasks: [], pinned: true, createdAt: now, updatedAt: now
+      content: '这里是你的私人笔记空间。\n\n• 点击左侧「新建笔记」记录想法。\n• 使用文件夹整理不同主题。\n• 创建待办清单，勾选完成的事项。\n• 点击笔记里的「图片」「文件」可以添加照片和附件。\n• 搜索可以查找标题、正文、待办内容和附件名称。\n\n笔记默认保存在这台设备的浏览器本地。建议定期使用左下角的「备份笔记」导出 JSON 文件，妥善保存备份。',
+      tasks: [], attachments: [], pinned: true, createdAt: now, updatedAt: now
     }],
     activeFolderId: 'all',
     activeNoteId: 'note_welcome'
@@ -54,9 +64,18 @@ function openDatabase() {
       const request = indexedDB.open(DB_NAME, DB_VERSION);
       request.onupgradeneeded = () => {
         const db = request.result;
+        // v1 -> v2：保留原有的 app-state（笔记），只新增附件仓库。
         if (!db.objectStoreNames.contains(STORE_NAME)) db.createObjectStore(STORE_NAME, { keyPath: 'key' });
+        if (!db.objectStoreNames.contains(ATTACH_STORE)) {
+          const store = db.createObjectStore(ATTACH_STORE, { keyPath: 'id' });
+          store.createIndex('noteId', 'noteId', { unique: false });
+        }
       };
-      request.onsuccess = () => resolve(request.result);
+      request.onsuccess = () => {
+        const db = request.result;
+        db.onversionchange = () => { db.close(); dbPromise = null; };
+        resolve(db);
+      };
       request.onerror = () => reject(request.error || new Error('无法打开本地数据库'));
       request.onblocked = () => reject(new Error('本地数据库正在被其他页面占用，请关闭重复打开的页面'));
     });
@@ -85,6 +104,64 @@ async function writeToDatabase(value) {
   });
 }
 
+function putAttachment(record) {
+  return openDatabase().then(db => new Promise((resolve, reject) => {
+    const transaction = db.transaction(ATTACH_STORE, 'readwrite');
+    transaction.objectStore(ATTACH_STORE).put(record);
+    transaction.oncomplete = () => resolve();
+    transaction.onerror = () => reject(transaction.error || new Error('保存附件失败'));
+    transaction.onabort = () => reject(transaction.error || new Error('存储空间不足或保存已中断'));
+  }));
+}
+
+function getAttachment(id) {
+  return openDatabase().then(db => new Promise((resolve, reject) => {
+    const request = db.transaction(ATTACH_STORE, 'readonly').objectStore(ATTACH_STORE).get(id);
+    request.onsuccess = () => resolve(request.result || null);
+    request.onerror = () => reject(request.error || new Error('读取附件失败'));
+  }));
+}
+
+function deleteAttachments(ids) {
+  if (!ids.length) return Promise.resolve();
+  return openDatabase().then(db => new Promise((resolve, reject) => {
+    const transaction = db.transaction(ATTACH_STORE, 'readwrite');
+    const store = transaction.objectStore(ATTACH_STORE);
+    ids.forEach(id => store.delete(id));
+    transaction.oncomplete = () => resolve();
+    transaction.onerror = () => reject(transaction.error || new Error('删除附件失败'));
+    transaction.onabort = () => reject(transaction.error || new Error('删除附件失败'));
+  }));
+}
+
+// 导入备份时：一次事务内同时替换笔记状态和全部附件，避免只导入一半。
+function replaceAllData(value, records) {
+  return openDatabase().then(db => new Promise((resolve, reject) => {
+    const transaction = db.transaction([STORE_NAME, ATTACH_STORE], 'readwrite');
+    transaction.objectStore(STORE_NAME).put({ key: STATE_KEY, value });
+    const store = transaction.objectStore(ATTACH_STORE);
+    store.clear();
+    records.forEach(record => store.put(record));
+    transaction.oncomplete = () => resolve();
+    transaction.onerror = () => reject(transaction.error || new Error('导入失败'));
+    transaction.onabort = () => reject(transaction.error || new Error('存储空间不足，导入已取消，原有数据未改变'));
+  }));
+}
+
+function normalizeAttachments(list) {
+  if (!Array.isArray(list)) return [];
+  return list
+    .filter(a => a && typeof a.id === 'string' && typeof a.name === 'string')
+    .map(a => ({
+      id: a.id,
+      name: a.name.slice(0, 200),
+      type: typeof a.type === 'string' ? a.type : '',
+      size: Number.isFinite(a.size) ? a.size : 0,
+      kind: a.kind === 'image' ? 'image' : 'file',
+      createdAt: a.createdAt || new Date().toISOString()
+    }));
+}
+
 function normalizeState(candidate) {
   if (!candidate || !Array.isArray(candidate.folders) || !Array.isArray(candidate.notes)) {
     throw new Error('备份文件格式不正确。');
@@ -103,6 +180,7 @@ function normalizeState(candidate) {
       title: typeof n.title === 'string' ? n.title.slice(0, 120) : '',
       content: typeof n.content === 'string' ? n.content : '',
       tasks: Array.isArray(n.tasks) ? n.tasks.filter(t => t && typeof t.text === 'string').map(t => ({ id: typeof t.id === 'string' ? t.id : makeId('task'), text: t.text.slice(0, 180), done: Boolean(t.done) })) : [],
+      attachments: normalizeAttachments(n.attachments),
       pinned: Boolean(n.pinned),
       createdAt: n.createdAt || new Date().toISOString(),
       updatedAt: n.updatedAt || new Date().toISOString()
@@ -175,7 +253,8 @@ function displayTitle(note) { return note.title.trim() || (note.type === 'tasks'
 function countTasks(note) { return { total: note.tasks.length, done: note.tasks.filter(task => task.done).length }; }
 function textForSearch(note) {
   const taskText = note.type === 'tasks' ? note.tasks.map(task => task.text).join(' ') : '';
-  return `${note.title} ${note.content || ''} ${taskText}`.toLocaleLowerCase();
+  const fileText = (note.attachments || []).map(item => item.name).join(' ');
+  return `${note.title} ${note.content || ''} ${taskText} ${fileText}`.toLocaleLowerCase();
 }
 function activeFilterNotes() {
   let notes = [...state.notes];
@@ -194,6 +273,21 @@ function formatDate(value) {
   const yesterday = new Date(now); yesterday.setDate(now.getDate() - 1);
   if (date.toDateString() === yesterday.toDateString()) return '昨天';
   return `${date.getMonth() + 1}月${date.getDate()}日`;
+}
+function formatSize(bytes) {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(bytes < 10240 ? 1 : 0)} KB`;
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+  return `${(bytes / 1024 / 1024 / 1024).toFixed(2)} GB`;
+}
+function attachmentSummary(note) {
+  const list = note.attachments || [];
+  const images = list.filter(item => item.kind === 'image').length;
+  const files = list.length - images;
+  const parts = [];
+  if (images) parts.push(`${images} 张图片`);
+  if (files) parts.push(`${files} 个文件`);
+  return parts.join('、');
 }
 function notePreview(note) {
   if (note.type === 'tasks') {
@@ -261,7 +355,9 @@ function renderNotes() {
     const date = document.createElement('span'); date.textContent = formatDate(note.updatedAt);
     bottom.append(folder, date);
     if (note.type === 'tasks') { const { total, done } = countTasks(note); date.textContent = `${done}/${total} 完成 · ${formatDate(note.updatedAt)}`; date.className = 'task-mini-progress'; }
-    card.append(top, preview, bottom);
+    const attachText = attachmentSummary(note);
+    if (attachText) { const tag = document.createElement('span'); tag.className = 'note-card-attach'; tag.textContent = `📎 ${attachText}`; card.append(top, preview, tag, bottom); }
+    else card.append(top, preview, bottom);
     const activate = () => { state.activeNoteId = note.id; render(); closeSidebar(); };
     card.addEventListener('click', activate);
     card.addEventListener('keydown', event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); activate(); } });
@@ -300,6 +396,7 @@ function renderEditor() {
   const note = getActiveNote();
   if (!note) {
     els.emptyEditor.hidden = false; els.noteEditor.hidden = true;
+    releaseUnusedUrls(new Set());
     document.body.classList.remove('mobile-editing');
     return;
   }
@@ -320,6 +417,7 @@ function renderEditor() {
   els.noteFolder.value = note.folderId;
   updateMeta(note);
   if (note.type === 'tasks') { renderTaskItems(note); updateTaskProgress(note); }
+  renderAttachments();
 }
 
 function render() {
@@ -331,7 +429,7 @@ function closeSidebar() { document.body.classList.remove('sidebar-open'); }
 function createNote(type = 'note') {
   const now = new Date().toISOString();
   const selectedFolder = state.folders.some(folder => folder.id === state.activeFolderId) ? state.activeFolderId : 'folder_default';
-  const note = { id: makeId('note'), folderId: selectedFolder, type, title: '', content: '', tasks: [], pinned: false, createdAt: now, updatedAt: now };
+  const note = { id: makeId('note'), folderId: selectedFolder, type, title: '', content: '', tasks: [], attachments: [], pinned: false, createdAt: now, updatedAt: now };
   state.notes.push(note); state.activeNoteId = note.id;
   render(); scheduleSave(); closeSidebar();
   if (type === 'tasks') els.newTaskInput.focus(); else els.noteTitle.focus();
@@ -385,21 +483,240 @@ function addTask() {
   renderTaskItems(note); updateTaskProgress(note); updateMeta(note); renderNotes(); scheduleSave(); els.newTaskInput.focus();
 }
 
+
+// ===== 图片与文件附件 =====
+function releaseUnusedUrls(keep) {
+  for (const [id, url] of objectUrls) {
+    if (!keep.has(id)) { URL.revokeObjectURL(url); objectUrls.delete(id); }
+  }
+}
+
+function urlForAttachment(id, blob) {
+  let url = objectUrls.get(id);
+  if (!url) { url = URL.createObjectURL(blob); objectUrls.set(id, url); }
+  return url;
+}
+
+function loadImageElement(blob) {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(blob);
+    const img = new Image();
+    img.onload = () => { URL.revokeObjectURL(url); resolve(img); };
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('无法读取这张图片')); };
+    img.src = url;
+  });
+}
+
+function canvasToBlob(canvas, type, quality) {
+  return new Promise(resolve => canvas.toBlob(resolve, type, quality));
+}
+
+// 大图缩小到最长边 1600px 并压缩为 JPEG；GIF/SVG 保持原样。
+async function prepareImage(file) {
+  const baseName = (file.name || '').replace(/\.[^.]+$/, '') || `图片-${Date.now()}`;
+  const keepOriginal = { blob: file, name: file.name || `${baseName}.jpg`, type: file.type || 'image/jpeg' };
+  if (/image\/(gif|svg)/i.test(file.type)) return keepOriginal;
+  let img;
+  try { img = await loadImageElement(file); } catch (_) { return null; }
+  const width = img.naturalWidth, height = img.naturalHeight;
+  if (!width || !height) return null;
+  const scale = Math.min(1, MAX_IMAGE_EDGE / Math.max(width, height));
+  if (scale === 1 && file.size <= 800 * 1024 && /jpe?g|png|webp/i.test(file.type)) return keepOriginal;
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.max(1, Math.round(width * scale));
+  canvas.height = Math.max(1, Math.round(height * scale));
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+  const blob = await canvasToBlob(canvas, 'image/jpeg', JPEG_QUALITY);
+  canvas.width = canvas.height = 0;
+  if (!blob) return keepOriginal;
+  if (scale === 1 && blob.size >= file.size) return keepOriginal;
+  return { blob, name: `${baseName}.jpg`, type: 'image/jpeg' };
+}
+
+async function addAttachments(fileList, kind) {
+  const note = getActiveNote();
+  const files = Array.from(fileList || []);
+  if (!note || !files.length) return;
+  if (!Array.isArray(note.attachments)) note.attachments = [];
+  if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
+  showToast(kind === 'image' ? '正在处理图片…' : '正在添加文件…');
+  let added = 0; const problems = [];
+  for (const file of files) {
+    const label = file.name || '未命名';
+    try {
+      if (file.size > MAX_FILE_BYTES) { problems.push(`「${label}」超过 50 MB`); continue; }
+      let item = { blob: file, name: file.name || `文件-${Date.now()}`, type: file.type || 'application/octet-stream' };
+      let itemKind = 'file';
+      if (kind === 'image') {
+        const prepared = await prepareImage(file);
+        if (prepared) { item = prepared; itemKind = 'image'; }
+        else { problems.push(`「${label}」无法识别为图片，已作为文件保存`); item.name = file.name || `图片-${Date.now()}`; }
+      }
+      const id = makeId('att');
+      await putAttachment({ id, noteId: note.id, name: item.name, type: item.type, size: item.blob.size, kind: itemKind, createdAt: new Date().toISOString(), blob: item.blob });
+      note.attachments.push({ id, name: item.name, type: item.type, size: item.blob.size, kind: itemKind, createdAt: new Date().toISOString() });
+      added++;
+    } catch (error) {
+      console.error(error);
+      problems.push(`「${label}」保存失败（可能存储空间不足）`);
+    }
+  }
+  if (added) { note.updatedAt = new Date().toISOString(); scheduleSave(); }
+  if (state.notes.includes(note)) { if (note.id === state.activeNoteId) { updateMeta(note); renderAttachments(); } renderNotes(); }
+  if (problems.length) showToast(`${added ? `已添加 ${added} 项；` : ''}${problems[0]}${problems.length > 1 ? `等 ${problems.length} 项有问题` : ''}`);
+  else if (added) showToast(`已添加 ${added} 项${kind === 'image' ? '图片' : '文件'}。`);
+}
+
+async function removeAttachment(attachment) {
+  const note = getActiveNote(); if (!note) return;
+  if (!window.confirm(`删除${attachment.kind === 'image' ? '图片' : '文件'}「${attachment.name}」？此操作无法撤销。`)) return;
+  note.attachments = note.attachments.filter(item => item.id !== attachment.id);
+  note.updatedAt = new Date().toISOString();
+  const url = objectUrls.get(attachment.id);
+  if (url) { URL.revokeObjectURL(url); objectUrls.delete(attachment.id); }
+  try { await deleteAttachments([attachment.id]); } catch (error) { console.error(error); }
+  scheduleSave(); renderAttachments(); updateMeta(note); renderNotes(); showToast('附件已删除。');
+}
+
+function openImageViewer(attachment, url) {
+  els.viewerImage.src = url; els.viewerImage.alt = attachment.name;
+  els.viewerName.textContent = attachment.name;
+  els.viewerSave.href = url; els.viewerSave.download = attachment.name;
+  if (!els.imageDialog.open) els.imageDialog.showModal();
+}
+
+function closeImageViewer() {
+  if (els.imageDialog.open) els.imageDialog.close();
+  els.viewerImage.removeAttribute('src');
+}
+
+function downloadAttachment(attachment, blob) {
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement('a');
+  anchor.href = url; anchor.download = attachment.name; anchor.rel = 'noopener';
+  document.body.append(anchor); anchor.click(); anchor.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 60000);
+}
+
+async function shareAttachment(attachment, blob) {
+  try {
+    const file = new File([blob], attachment.name, { type: attachment.type || blob.type });
+    await navigator.share({ files: [file], title: attachment.name });
+  } catch (error) {
+    if (error && error.name !== 'AbortError') { console.error(error); showToast('无法分享此文件，请改用「打开」。'); }
+  }
+}
+
+function canShareFile(attachment, blob) {
+  try {
+    if (!navigator.share || !navigator.canShare) return false;
+    return navigator.canShare({ files: [new File([blob], attachment.name, { type: attachment.type || blob.type })] });
+  } catch (_) { return false; }
+}
+
+async function renderAttachments() {
+  const token = ++attachRenderToken;
+  const note = getActiveNote();
+  const list = note ? (note.attachments || []) : [];
+  releaseUnusedUrls(new Set(list.map(item => item.id)));
+  els.attachGallery.replaceChildren(); els.attachFiles.replaceChildren();
+  els.attachSummary.textContent = list.length ? `已添加 ${attachmentSummary(note)}` : '还没有图片或文件';
+  if (!list.length) return;
+  const records = await Promise.all(list.map(item => getAttachment(item.id).catch(() => null)));
+  if (token !== attachRenderToken) return;
+  list.forEach((attachment, index) => {
+    const record = records[index];
+    if (attachment.kind === 'image') {
+      const tile = document.createElement('div'); tile.className = 'attach-thumb';
+      if (!record || !record.blob) {
+        tile.classList.add('missing'); tile.textContent = '图片丢失';
+      } else {
+        const url = urlForAttachment(attachment.id, record.blob);
+        const open = document.createElement('button'); open.type = 'button'; open.className = 'attach-thumb-open'; open.setAttribute('aria-label', `查看图片 ${attachment.name}`);
+        const img = document.createElement('img'); img.src = url; img.alt = attachment.name; img.loading = 'lazy'; img.decoding = 'async';
+        open.append(img); open.addEventListener('click', () => openImageViewer(attachment, url));
+        tile.append(open);
+      }
+      const del = document.createElement('button'); del.type = 'button'; del.className = 'attach-remove'; del.textContent = '×'; del.setAttribute('aria-label', `删除 ${attachment.name}`); del.title = '删除图片';
+      del.addEventListener('click', () => removeAttachment(attachment));
+      tile.append(del); els.attachGallery.append(tile);
+    } else {
+      const row = document.createElement('div'); row.className = 'attach-file';
+      const icon = document.createElement('span'); icon.className = 'attach-file-icon'; icon.textContent = '▤';
+      const main = document.createElement('button'); main.type = 'button'; main.className = 'attach-file-main';
+      const name = document.createElement('span'); name.className = 'attach-file-name'; name.textContent = attachment.name;
+      const size = document.createElement('span'); size.className = 'attach-file-size'; size.textContent = record && record.blob ? formatSize(attachment.size) : '文件丢失';
+      main.append(name, size); main.setAttribute('aria-label', `打开 ${attachment.name}`);
+      row.append(icon, main);
+      if (record && record.blob) {
+        main.addEventListener('click', () => downloadAttachment(attachment, record.blob));
+        if (canShareFile(attachment, record.blob)) {
+          const share = document.createElement('button'); share.type = 'button'; share.className = 'attach-file-action'; share.textContent = '分享'; share.title = '分享或存储到“文件”';
+          share.addEventListener('click', () => shareAttachment(attachment, record.blob)); row.append(share);
+        }
+      }
+      const del = document.createElement('button'); del.type = 'button'; del.className = 'attach-file-action danger'; del.textContent = '删除'; del.setAttribute('aria-label', `删除 ${attachment.name}`);
+      del.addEventListener('click', () => removeAttachment(attachment));
+      row.append(del); els.attachFiles.append(row);
+    }
+  });
+}
+
+function blobToDataUrl(blob) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = () => reject(reader.error || new Error('读取附件失败'));
+    reader.readAsDataURL(blob);
+  });
+}
+
+function dataUrlToBlob(dataUrl, fallbackType) {
+  const match = /^data:([^;,]*)((?:;[^;,]*)*?),(.*)$/s.exec(dataUrl);
+  if (!match) throw new Error('备份中的附件数据格式不正确。');
+  const type = match[1] || fallbackType || 'application/octet-stream';
+  const isBase64 = /;base64/i.test(match[2]);
+  const raw = isBase64 ? atob(match[3]) : decodeURIComponent(match[3]);
+  const bytes = new Uint8Array(raw.length);
+  for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
+  return new Blob([bytes], { type });
+}
+
 function deleteCurrentNote() {
   const note = getActiveNote(); if (!note) return;
   if (!window.confirm(`确定删除「${displayTitle(note)}」吗？此操作无法撤销。建议先备份重要内容。`)) return;
+  const attachmentIds = (note.attachments || []).map(item => item.id);
   state.notes = state.notes.filter(item => item.id !== note.id);
-  state.activeNoteId = null; render(); scheduleSave(); showToast('笔记已删除。');
+  state.activeNoteId = null; render(); scheduleSave();
+  deleteAttachments(attachmentIds).catch(error => console.error(error));
+  showToast('笔记已删除。');
 }
 
 async function exportBackup() {
   await saveNow();
-  const backup = { app: '简记', version: 1, exportedAt: new Date().toISOString(), folders: state.folders, notes: state.notes };
-  const blob = new Blob([JSON.stringify(backup, null, 2)], { type: 'application/json;charset=utf-8' });
-  const url = URL.createObjectURL(blob);
-  const anchor = document.createElement('a'); anchor.href = url; anchor.download = `简记备份-${new Date().toISOString().slice(0,10)}.json`;
-  document.body.append(anchor); anchor.click(); anchor.remove(); URL.revokeObjectURL(url);
-  showToast('备份文件已生成，请妥善保存。');
+  try {
+    showToast('正在生成备份…');
+    const parts = [`{"app":"简记","version":2,"exportedAt":${JSON.stringify(new Date().toISOString())},"folders":${JSON.stringify(state.folders)},"notes":[`];
+    for (let index = 0; index < state.notes.length; index++) {
+      const note = state.notes[index];
+      const attachments = [];
+      for (const meta of (note.attachments || [])) {
+        const record = await getAttachment(meta.id).catch(() => null);
+        if (record && record.blob) attachments.push({ ...meta, data: await blobToDataUrl(record.blob) });
+      }
+      parts.push((index ? ',\n' : '\n') + JSON.stringify({ ...note, attachments }));
+    }
+    parts.push('\n]}');
+    const blob = new Blob(parts, { type: 'application/json;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a'); anchor.href = url; anchor.download = `简记备份-${new Date().toISOString().slice(0,10)}.json`;
+    document.body.append(anchor); anchor.click(); anchor.remove(); setTimeout(() => URL.revokeObjectURL(url), 60000);
+    showToast('备份文件已生成（含图片和文件），请妥善保存。');
+  } catch (error) {
+    console.error(error); showToast('生成备份失败，可能是附件太多导致内存不足。');
+  }
 }
 
 async function importBackup(file) {
@@ -407,8 +724,27 @@ async function importBackup(file) {
   try {
     const parsed = JSON.parse(await file.text());
     const restored = normalizeState(parsed);
-    if (!window.confirm(`导入备份将替换当前设备中的全部笔记。备份内有 ${restored.notes.length} 条笔记、${restored.folders.length} 个文件夹。建议先导出当前数据。继续吗？`)) return;
-    state = restored; await saveNow(); render(); showToast('备份导入完成。');
+    // 旧版备份没有附件字段，会得到空附件列表，保持兼容。
+    const dataById = new Map();
+    (Array.isArray(parsed.notes) ? parsed.notes : []).forEach(n => {
+      if (n && Array.isArray(n.attachments)) n.attachments.forEach(a => { if (a && typeof a.id === 'string' && typeof a.data === 'string') dataById.set(a.id, a); });
+    });
+    const records = [];
+    restored.notes.forEach(note => {
+      note.attachments = note.attachments.filter(meta => {
+        const source = dataById.get(meta.id);
+        if (!source) return false;
+        try {
+          const blob = dataUrlToBlob(source.data, meta.type);
+          records.push({ id: meta.id, noteId: note.id, name: meta.name, type: meta.type || blob.type, size: blob.size, kind: meta.kind, createdAt: meta.createdAt, blob });
+          meta.size = blob.size; return true;
+        } catch (_) { return false; }
+      });
+    });
+    if (!window.confirm(`导入备份将替换当前设备中的全部笔记和附件。备份内有 ${restored.notes.length} 条笔记、${restored.folders.length} 个文件夹、${records.length} 个附件。建议先导出当前数据。继续吗？`)) return;
+    clearTimeout(saveTimer);
+    await replaceAllData(JSON.parse(JSON.stringify(restored)), records);
+    state = restored; releaseUnusedUrls(new Set()); render(); setSaveStatus('已保存在此设备'); showToast('备份导入完成。');
   } catch (error) {
     console.error(error); showToast(error.message || '无法读取备份文件。');
   } finally { els.importFile.value = ''; }
@@ -429,6 +765,14 @@ function bindEvents() {
   $('#deleteNoteButton').addEventListener('click', deleteCurrentNote);
   $('#addTaskButton').addEventListener('click', addTask);
   els.newTaskInput.addEventListener('keydown', event => { if (event.key === 'Enter') { event.preventDefault(); addTask(); } });
+  els.attachImageButton.addEventListener('click', () => els.attachImageInput.click());
+  els.attachFileButton.addEventListener('click', () => els.attachFileInput.click());
+  els.attachImageInput.addEventListener('change', () => { const files = Array.from(els.attachImageInput.files); els.attachImageInput.value = ''; addAttachments(files, 'image'); });
+  els.attachFileInput.addEventListener('change', () => { const files = Array.from(els.attachFileInput.files); els.attachFileInput.value = ''; addAttachments(files, 'file'); });
+  $('#viewerClose').addEventListener('click', closeImageViewer);
+  els.viewerImage.addEventListener('click', closeImageViewer);
+  els.imageDialog.addEventListener('click', event => { if (event.target === els.imageDialog) closeImageViewer(); });
+  els.imageDialog.addEventListener('close', () => els.viewerImage.removeAttribute('src'));
   els.folderForm.addEventListener('submit', saveFolder);
   els.deleteFolder.addEventListener('click', deleteFolder);
   $('#menuButton').addEventListener('click', () => document.body.classList.toggle('sidebar-open'));
@@ -445,7 +789,7 @@ function bindEvents() {
     if (event.key === 'Escape') closeSidebar();
   });
   window.addEventListener('resize', () => { if (window.innerWidth > 820) document.body.classList.remove('mobile-editing'); });
-  window.addEventListener('pagehide', () => { if (state) { try { localStorage.setItem(LEGACY_KEY, JSON.stringify(state)); } catch (_) { /* IndexedDB remains the primary store */ } } });
+  window.addEventListener('pagehide', () => { releaseUnusedUrls(new Set()); if (state) { try { localStorage.setItem(LEGACY_KEY, JSON.stringify(state)); } catch (_) { /* IndexedDB remains the primary store */ } } });
 }
 
 async function registerServiceWorker() {
