@@ -168,6 +168,17 @@
     <div class="viewer-bar"><span class="viewer-name" id="viewerName"></span><a class="viewer-save" id="viewerSave" href="#" download>保存</a><button class="viewer-close" id="viewerClose" type="button" aria-label="关闭">×</button></div>
     <img id="viewerImage" alt="">
   </dialog>
+  <dialog class="app-dialog confirm-dialog" id="confirmDialog" aria-labelledby="confirmTitle">
+    <form method="dialog" id="confirmForm">
+      <div class="dialog-topline"><span class="dialog-kicker">CONFIRM</span><button class="dialog-close" value="cancel" type="submit" aria-label="关闭">×</button></div>
+      <h2 id="confirmTitle">确认操作</h2>
+      <p class="dialog-description" id="confirmMessage"></p>
+      <div class="dialog-actions">
+        <button class="secondary-button" value="cancel" type="submit">取消</button>
+        <button class="primary-button danger-action" id="confirmOkButton" value="ok" type="submit">删除</button>
+      </div>
+    </form>
+  </dialog>
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
   <script src="./app.js" defer></script>

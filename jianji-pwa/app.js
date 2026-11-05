@@ -26,7 +26,8 @@ const els = {
   attachImageButton: $('#attachImageButton'), attachFileButton: $('#attachFileButton'),
   attachImageInput: $('#attachImageInput'), attachFileInput: $('#attachFileInput'),
   attachGallery: $('#attachGallery'), attachFiles: $('#attachFiles'), attachSummary: $('#attachSummary'),
-  imageDialog: $('#imageDialog'), viewerImage: $('#viewerImage'), viewerName: $('#viewerName'), viewerSave: $('#viewerSave')
+  imageDialog: $('#imageDialog'), viewerImage: $('#viewerImage'), viewerName: $('#viewerName'), viewerSave: $('#viewerSave'),
+  confirmDialog: $('#confirmDialog'), confirmTitle: $('#confirmTitle'), confirmMessage: $('#confirmMessage'), confirmOk: $('#confirmOkButton')
 };
 
 let state = null;
@@ -247,6 +248,38 @@ function showToast(message) {
   toastTimer = setTimeout(() => els.toast.classList.remove('show'), 2400);
 }
 
+// iPhone 主屏幕 PWA 里 window.confirm/alert 常被系统直接吞掉或立刻返回 false，
+// 导致删除笔记、附件等操作看起来“点了没反应”。统一改用应用内确认框。
+function askConfirm(message, { title = '确认操作', okText = '删除', cancelText = '取消' } = {}) {
+  return new Promise(resolve => {
+    if (!els.confirmDialog || typeof els.confirmDialog.showModal !== 'function') {
+      resolve(window.confirm(message));
+      return;
+    }
+    let settled = false;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      els.confirmDialog.removeEventListener('close', onClose);
+      els.confirmDialog.removeEventListener('cancel', onCancel);
+      resolve(value);
+    };
+    const onClose = () => finish(els.confirmDialog.returnValue === 'ok');
+    const onCancel = (event) => { event.preventDefault(); finish(false); };
+    els.confirmTitle.textContent = title;
+    els.confirmMessage.textContent = message;
+    els.confirmOk.textContent = okText;
+    const cancelBtn = els.confirmDialog.querySelector('button[value="cancel"].secondary-button');
+    if (cancelBtn) cancelBtn.textContent = cancelText;
+    els.confirmDialog.addEventListener('close', onClose);
+    els.confirmDialog.addEventListener('cancel', onCancel);
+    if (els.confirmDialog.open) els.confirmDialog.close('cancel');
+    els.confirmDialog.returnValue = '';
+    els.confirmDialog.showModal();
+    setTimeout(() => els.confirmOk.focus(), 30);
+  });
+}
+
 function getActiveNote() { return state.notes.find(note => note.id === state.activeNoteId) || null; }
 function getFolderName(id) { return state.folders.find(folder => folder.id === id)?.name || '默认文件夹'; }
 function displayTitle(note) { return note.title.trim() || (note.type === 'tasks' ? '未命名清单' : '无标题'); }
@@ -374,7 +407,13 @@ function renderTaskItems(note) {
     const input = document.createElement('input'); input.type = 'text'; input.className = 'task-item-text'; input.value = task.text; input.maxLength = 180; input.setAttribute('aria-label', '待办内容');
     input.addEventListener('input', () => { task.text = input.value; note.updatedAt = new Date().toISOString(); renderNotes(); scheduleSave(); updateMeta(note); });
     const remove = document.createElement('button'); remove.type = 'button'; remove.className = 'task-remove'; remove.textContent = '×'; remove.setAttribute('aria-label', '删除待办');
-    remove.addEventListener('click', () => { note.tasks = note.tasks.filter(item => item.id !== task.id); note.updatedAt = new Date().toISOString(); renderTaskItems(note); updateTaskProgress(note); renderNotes(); scheduleSave(); });
+    remove.addEventListener('click', event => {
+      event.preventDefault(); event.stopPropagation();
+      note.tasks = note.tasks.filter(item => item.id !== task.id);
+      note.updatedAt = new Date().toISOString();
+      renderTaskItems(note); updateTaskProgress(note); updateMeta(note); renderNotes(); scheduleSave();
+      showToast('待办已删除。');
+    });
     row.append(checkbox, input, remove); els.taskItems.append(row);
   });
 }
@@ -463,10 +502,11 @@ function saveFolder(event) {
   els.folderDialog.close(); render(); scheduleSave();
 }
 
-function deleteFolder() {
+async function deleteFolder() {
   const folder = state.folders.find(item => item.id === editingFolderId);
   if (!folder || folder.id === 'folder_default') return;
-  if (!window.confirm(`删除「${folder.name}」？其中的笔记会移动到「默认文件夹」，不会被删除。`)) return;
+  const ok = await askConfirm(`删除「${folder.name}」？其中的笔记会移动到「默认文件夹」，不会被删除。`, { title: '删除文件夹', okText: '删除' });
+  if (!ok) return;
   state.notes.forEach(note => { if (note.folderId === folder.id) note.folderId = 'folder_default'; });
   state.folders = state.folders.filter(item => item.id !== folder.id);
   if (state.activeFolderId === folder.id) state.activeFolderId = 'all';
@@ -571,8 +611,10 @@ async function addAttachments(fileList, kind) {
 
 async function removeAttachment(attachment) {
   const note = getActiveNote(); if (!note) return;
-  if (!window.confirm(`删除${attachment.kind === 'image' ? '图片' : '文件'}「${attachment.name}」？此操作无法撤销。`)) return;
-  note.attachments = note.attachments.filter(item => item.id !== attachment.id);
+  const kindLabel = attachment.kind === 'image' ? '图片' : '文件';
+  const ok = await askConfirm(`删除${kindLabel}「${attachment.name}」？此操作无法撤销。`, { title: `删除${kindLabel}`, okText: '删除' });
+  if (!ok) return;
+  note.attachments = (note.attachments || []).filter(item => item.id !== attachment.id);
   note.updatedAt = new Date().toISOString();
   const url = objectUrls.get(attachment.id);
   if (url) { URL.revokeObjectURL(url); objectUrls.delete(attachment.id); }
@@ -640,7 +682,7 @@ async function renderAttachments() {
         tile.append(open);
       }
       const del = document.createElement('button'); del.type = 'button'; del.className = 'attach-remove'; del.textContent = '×'; del.setAttribute('aria-label', `删除 ${attachment.name}`); del.title = '删除图片';
-      del.addEventListener('click', () => removeAttachment(attachment));
+      del.addEventListener('click', event => { event.preventDefault(); event.stopPropagation(); removeAttachment(attachment); });
       tile.append(del); els.attachGallery.append(tile);
     } else {
       const row = document.createElement('div'); row.className = 'attach-file';
@@ -658,7 +700,7 @@ async function renderAttachments() {
         }
       }
       const del = document.createElement('button'); del.type = 'button'; del.className = 'attach-file-action danger'; del.textContent = '删除'; del.setAttribute('aria-label', `删除 ${attachment.name}`);
-      del.addEventListener('click', () => removeAttachment(attachment));
+      del.addEventListener('click', event => { event.preventDefault(); event.stopPropagation(); removeAttachment(attachment); });
       row.append(del); els.attachFiles.append(row);
     }
   });
@@ -684,9 +726,10 @@ function dataUrlToBlob(dataUrl, fallbackType) {
   return new Blob([bytes], { type });
 }
 
-function deleteCurrentNote() {
+async function deleteCurrentNote() {
   const note = getActiveNote(); if (!note) return;
-  if (!window.confirm(`确定删除「${displayTitle(note)}」吗？此操作无法撤销。建议先备份重要内容。`)) return;
+  const ok = await askConfirm(`确定删除「${displayTitle(note)}」吗？此操作无法撤销。建议先备份重要内容。`, { title: '删除笔记', okText: '删除' });
+  if (!ok) return;
   const attachmentIds = (note.attachments || []).map(item => item.id);
   state.notes = state.notes.filter(item => item.id !== note.id);
   state.activeNoteId = null; render(); scheduleSave();
@@ -741,7 +784,8 @@ async function importBackup(file) {
         } catch (_) { return false; }
       });
     });
-    if (!window.confirm(`导入备份将替换当前设备中的全部笔记和附件。备份内有 ${restored.notes.length} 条笔记、${restored.folders.length} 个文件夹、${records.length} 个附件。建议先导出当前数据。继续吗？`)) return;
+    const ok = await askConfirm(`导入备份将替换当前设备中的全部笔记和附件。备份内有 ${restored.notes.length} 条笔记、${restored.folders.length} 个文件夹、${records.length} 个附件。建议先导出当前数据。继续吗？`, { title: '导入备份', okText: '继续导入', cancelText: '取消' });
+    if (!ok) return;
     clearTimeout(saveTimer);
     await replaceAllData(JSON.parse(JSON.stringify(restored)), records);
     state = restored; releaseUnusedUrls(new Set()); render(); setSaveStatus('已保存在此设备'); showToast('备份导入完成。');
